@@ -2,23 +2,34 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+
 from sklearn.ensemble import RandomForestClassifier
 
 st.set_page_config(page_title="F1 Race Win Predictor", page_icon="🏎️", layout="centered")
 
-BASE_URL = "http://api.jolpi.ca/ergast/f1"
+BASE_URL = "https://api.jolpi.ca/ergast/f1"
 HEADERS = {"User-Agent": "F1PredictionPortfolioProject/1.0"}
+DATA_FILE = "f1_results.csv"
 
 
-@st.cache_data(show_spinner=False)
+# ---------- Load the bundled historical dataset (no live API call needed) ----------
+@st.cache_data(show_spinner="Loading race history...")
+def load_local_data():
+    df = pd.read_csv(DATA_FILE)
+    df = df.dropna(subset=["position"])
+    return df
+
+
+# ---------- Optional: fetch the newest season's results live ----------
 def fetch_season_results(year):
     """Fetch every race result for one F1 season, handling pagination."""
     results = []
     offset = 0
     limit = 100
+    session = requests.Session()
     while True:
         url = f"{BASE_URL}/{year}/results.json?limit={limit}&offset={offset}"
-        resp = requests.get(url, headers=HEADERS, timeout=30)
+        resp = session.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
         data = resp.json()["MRData"]
         races = data["RaceTable"]["Races"]
@@ -42,18 +53,8 @@ def fetch_season_results(year):
         offset += limit
         if offset >= total:
             break
-        time.sleep(0.2)
+        time.sleep(0.3)
     return results
-
-
-@st.cache_data(show_spinner="Downloading F1 race history (first run only, then cached)...")
-def load_data(start_year, end_year):
-    all_results = []
-    for year in range(start_year, end_year + 1):
-        all_results.extend(fetch_season_results(year))
-    df = pd.DataFrame(all_results)
-    df = df.dropna(subset=["position"])
-    return df
 
 
 @st.cache_data(show_spinner="Building features...")
@@ -90,19 +91,38 @@ def train_model(df, train_end_year):
     return model, features
 
 
-# ---------- Load everything (cached, so this only fully runs once) ----------
-START_YEAR, END_YEAR = 2018, 2024
+# ---------- Load base data ----------
+if "df" not in st.session_state:
+    st.session_state.df = load_local_data()
 
-df = load_data(START_YEAR, END_YEAR)
-df = build_features(df)
-model, features = train_model(df, END_YEAR)
+# ---------- Sidebar: optional live refresh ----------
+with st.sidebar:
+    st.markdown("### Data")
+    max_season = int(st.session_state.df["season"].max())
+    st.caption(f"Bundled data covers up to {max_season}.")
+    if st.button("🔄 Try fetching a newer season"):
+        try:
+            new_rows = fetch_season_results(max_season + 1)
+            if new_rows:
+                new_df = pd.DataFrame(new_rows).dropna(subset=["position"])
+                st.session_state.df = pd.concat([st.session_state.df, new_df], ignore_index=True)
+                st.success(f"Added {max_season + 1} season data.")
+            else:
+                st.info(f"No results found yet for {max_season + 1}.")
+        except Exception as e:
+            st.warning(
+                "Couldn't reach the live API right now (it's a small free service and "
+                "sometimes rate-limits or is briefly unavailable). Using the saved data instead."
+            )
+
+df = build_features(st.session_state.df.copy())
+model, features = train_model(df, int(df["season"].max()))
 
 # ---------- UI ----------
 st.title("🏎️ F1 Race Win Predictor")
 st.write(
-    "A Random Forest model trained on grid position and recent form, "
-    f"using race data from {START_YEAR}–{END_YEAR}. Pick a race below to see "
-    "predicted win probabilities."
+    "A Random Forest model trained on grid position and recent form. "
+    "Pick a race below to see predicted win probabilities."
 )
 
 seasons = sorted(df["season"].unique(), reverse=True)
